@@ -2,6 +2,7 @@ import { Canvas, useFrame } from "@react-three/fiber";
 import { OrbitControls } from "@react-three/drei";
 import { useMemo, useRef } from "react";
 import type { Mesh } from "three";
+import * as THREE from "three";
 
 type Axis = "x" | "z";
 type Dir = 1 | -1;
@@ -27,6 +28,12 @@ interface BentRoadProps {
 }
 
 interface TrafficSignalProps {
+  x: number;
+  z: number;
+  phaseOffset: number;
+}
+
+interface SignalIntersection {
   x: number;
   z: number;
   phaseOffset: number;
@@ -64,8 +71,7 @@ const MAP_HALF = CENTERS[GRID - 1] + SPACING * 0.6;
 const ROAD_LEN = MAP_HALF * 2;
 const GROUND_SZ = ROAD_LEN + SPACING * 2;
 
-const TURN_CHANCE = 0.42;
-const UTURN_CHANCE = 0.08;
+const TURN_CHANCE = 0.64;
 const MAX_LATERAL = ROAD_W * 0.36;
 
 const PALETTE = [
@@ -93,6 +99,21 @@ function hash01(seed: number): number {
   const x = Math.sin(seed * 12.9898) * 43758.5453;
   return x - Math.floor(x);
 }
+
+const signalIntersections: SignalIntersection[] = CENTERS.flatMap((x, xi) =>
+  CENTERS.flatMap((z, zi) => {
+    const weight = hash01((xi + 1) * 97 + (zi + 1) * 193 + 0.271);
+    if (weight > SIGNAL_RATIO) return [];
+
+    return [
+      {
+        x,
+        z,
+        phaseOffset: hash01((xi + 1) * 131 + (zi + 1) * 211 + 0.619) * SIGNAL_CYCLE_SECONDS * 3,
+      },
+    ];
+  })
+);
 
 function pickBySeed<T>(arr: T[], seed: number): T {
   return arr[Math.floor(hash01(seed) * arr.length) % arr.length];
@@ -130,61 +151,235 @@ function Car({ seed }: CarProps) {
   const lateral = useRef<number>(initial.lateralOffset);
   const color = initial.color;
 
+  // Signal-aware intersection tracking
   const lastInt = useRef<number | null>(null);
 
-  useFrame((_, dt) => {
+  // Lerp targets for smooth motion
+  const currentPos = useRef(new THREE.Vector3());
+  const currentRot = useRef(0);
+
+  // Turn animation state
+  const isTurning = useRef(false);
+  const turnProgress = useRef(0);
+  const turnStartPos = useRef(new THREE.Vector3());
+  const turnEndPos = useRef(new THREE.Vector3());
+  const turnStartRot = useRef(0);
+  const turnEndRot = useRef(0);
+
+  // Speed state for smooth acceleration/deceleration
+  const currentSpeed = useRef(initial.speed);
+
+  // Get signal phase for a given intersection (-1 = no signal)
+  const getSignalPhase = (intX: number, intZ: number, time: number): number => {
+    for (const sig of signalIntersections) {
+      if (Math.abs(sig.x - intX) < 0.5 && Math.abs(sig.z - intZ) < 0.5) {
+        return Math.floor(((time + sig.phaseOffset) / SIGNAL_CYCLE_SECONDS) % 3);
+      }
+    }
+    return -1;
+  };
+
+  // Find the next intersection ahead in current direction
+  const findNextIntersection = (time: number): { dist: number; pos: number; isRed: boolean } | null => {
+    let bestDist = Infinity;
+    let bestPos: number | null = null;
+
+    for (const rc of CENTERS) {
+      const dist = (rc - along.current) * dir.current;
+      if (dist > 0.5 && dist < bestDist) {
+        bestDist = dist;
+        bestPos = rc;
+      }
+    }
+
+    if (bestPos === null) return null;
+
+    // Get the intersection coordinates
+    const intX = axis.current === "x" ? bestPos : center.current + lateral.current;
+    const intZ = axis.current === "z" ? bestPos : center.current + lateral.current;
+    const phase = getSignalPhase(intX, intZ, time);
+
+    return {
+      dist: bestDist,
+      pos: bestPos,
+      isRed: phase === 0,
+    };
+  };
+
+  useFrame(({ clock }, dt) => {
+    const time = clock.getElapsedTime();
     const mesh = ref.current;
     if (!mesh) return;
 
-    along.current += dir.current * speed.current * dt;
+    // Check if we're currently stopped at a red light
+    const nextInt = findNextIntersection(time);
 
+    if (nextInt && nextInt.isRed && nextInt.dist < 2) {
+      // At red light - stop before intersection
+      currentSpeed.current = THREE.MathUtils.lerp(currentSpeed.current, 0, dt * 8);
+
+      // Snap to stop line (slightly before intersection)
+      const stopLine = nextInt.pos - dir.current * 1.5;
+      along.current = THREE.MathUtils.lerp(along.current, stopLine, dt * 10);
+
+      // Update mesh position directly for stopping
+      if (axis.current === "x") {
+        mesh.position.set(along.current, 0.9, center.current + lateral.current);
+      } else {
+        mesh.position.set(center.current + lateral.current, 0.9, along.current);
+      }
+      return;
+    }
+
+    if (nextInt && nextInt.isRed && nextInt.dist < 12) {
+      // Approaching red light - decelerate
+      const decelFactor = Math.max(0.1, (nextInt.dist - 2) / 10);
+      currentSpeed.current = THREE.MathUtils.lerp(
+        currentSpeed.current,
+        speed.current * decelFactor,
+        dt * 4
+      );
+    } else if (nextInt && !nextInt.isRed) {
+      // Green light - can accelerate back to normal speed
+      currentSpeed.current = THREE.MathUtils.lerp(currentSpeed.current, speed.current, dt * 2);
+    } else {
+      // No upcoming signal or passed it - normalize speed
+      currentSpeed.current = THREE.MathUtils.lerp(currentSpeed.current, speed.current, dt * 2);
+    }
+
+    // Handle turning animation
+    if (isTurning.current) {
+      turnProgress.current = Math.min(1, turnProgress.current + dt * 3);
+      const t = THREE.MathUtils.smoothstep(turnProgress.current, 0, 1);
+
+      mesh.position.lerpVectors(turnStartPos.current, turnEndPos.current, t);
+      currentRot.current = THREE.MathUtils.lerp(turnStartRot.current, turnEndRot.current, t);
+      mesh.rotation.y = currentRot.current;
+
+      if (turnProgress.current >= 1) {
+        isTurning.current = false;
+        turnProgress.current = 0;
+      }
+      return;
+    }
+
+    // Normal movement
+    along.current += dir.current * currentSpeed.current * dt;
+
+    // Wrap around map
     if (along.current > MAP_HALF) along.current -= ROAD_LEN;
     if (along.current < -MAP_HALF) along.current += ROAD_LEN;
 
-    const snapDist = Math.max(1.2, speed.current * dt * 3);
+    // Intersection detection - only trigger when not stopped at red
+    const snapDist = Math.max(1.5, currentSpeed.current * dt * 3);
     let hitIntersection: number | null = null;
+    let closestDist = Infinity;
 
     for (const rc of CENTERS) {
-      if (Math.abs(along.current - rc) <= snapDist) {
+      const dist = Math.abs(along.current - rc);
+      if (dist <= snapDist && dist < closestDist) {
         hitIntersection = rc;
-        break;
+        closestDist = dist;
       }
     }
 
     if (hitIntersection !== null && hitIntersection !== lastInt.current) {
       lastInt.current = hitIntersection;
-      along.current = hitIntersection;
+
+      // Check if we should turn at this intersection
+      const intX = axis.current === "x" ? hitIntersection : center.current + lateral.current;
+      const intZ = axis.current === "z" ? hitIntersection : center.current + lateral.current;
+      const phase = getSignalPhase(intX, intZ, time);
+
+      // Don't turn if stopping at red
+      if (phase === 0 && nextInt && Math.abs(nextInt.pos - hitIntersection) < 1) {
+        return;
+      }
 
       const roll = Math.random();
 
-      if (roll < UTURN_CHANCE) {
-        dir.current = (dir.current * -1) as Dir;
-      } else if (roll < UTURN_CHANCE + TURN_CHANCE) {
+      if (roll < TURN_CHANCE) {
         const oldCenter = center.current;
-        axis.current = axis.current === "x" ? "z" : "x";
-        center.current = hitIntersection;
-        along.current = oldCenter;
-        dir.current = randomDir();
-        lateral.current = (Math.random() - 0.5) * 2 * MAX_LATERAL;
+        const oldAxis = axis.current;
+        const oldDir = dir.current;
+        const newAxis: Axis = oldAxis === "x" ? "z" : "x";
+        const newCenter = hitIntersection;
+        const newAlong = oldCenter;
+        const newDir = randomDir();
+        const newLateral = (hash01(seed + Math.random() * 100) - 0.5) * 2 * MAX_LATERAL;
+
+        // Calculate turn animation positions
+        const startPos = oldAxis === "x"
+          ? new THREE.Vector3(hitIntersection, 0.9, oldCenter + lateral.current)
+          : new THREE.Vector3(oldCenter + lateral.current, 0.9, hitIntersection);
+
+        const endPos = newAxis === "x"
+          ? new THREE.Vector3(newAlong, 0.9, newCenter + newLateral)
+          : new THREE.Vector3(newCenter + newLateral, 0.9, newAlong);
+
+        const startRot = oldAxis === "x"
+          ? (oldDir > 0 ? 0 : Math.PI)
+          : (oldDir > 0 ? -Math.PI / 2 : Math.PI / 2);
+        const endRot = newAxis === "x"
+          ? (newDir > 0 ? 0 : Math.PI)
+          : (newDir > 0 ? -Math.PI / 2 : Math.PI / 2);
+
+        // Store turn state
+        isTurning.current = true;
+        turnProgress.current = 0;
+        turnStartPos.current.copy(startPos);
+        turnEndPos.current.copy(endPos);
+        turnStartRot.current = startRot;
+        turnEndRot.current = endRot;
+
+        // Update logical state immediately
+        axis.current = newAxis;
+        center.current = newCenter;
+        along.current = newAlong;
+        dir.current = newDir;
+        lateral.current = newLateral;
         lastInt.current = null;
+
+        // Set initial position for turn animation
+        mesh.position.copy(startPos);
+        mesh.rotation.y = startRot;
+        currentPos.current.copy(startPos);
+        currentRot.current = startRot;
+
+        return;
       }
     }
 
-    if (hitIntersection === null) lastInt.current = null;
+    if (hitIntersection === null) {
+      lastInt.current = null;
+    } else if (lastInt.current !== null && Math.abs(along.current - lastInt.current) > snapDist * 1.4) {
+      lastInt.current = null;
+    }
 
     lateral.current = Math.max(-MAX_LATERAL, Math.min(MAX_LATERAL, lateral.current));
 
+    // Set target position with lerp
+    let targetX: number, targetZ: number, targetRotY: number;
+
     if (axis.current === "x") {
-      mesh.position.set(along.current, 0.9, center.current + lateral.current);
-      mesh.rotation.y = dir.current > 0 ? 0 : Math.PI;
+      targetX = along.current;
+      targetZ = center.current + lateral.current;
+      targetRotY = dir.current > 0 ? 0 : Math.PI;
     } else {
-      mesh.position.set(center.current + lateral.current, 0.9, along.current);
-      mesh.rotation.y = dir.current > 0 ? -Math.PI / 2 : Math.PI / 2;
+      targetX = center.current + lateral.current;
+      targetZ = along.current;
+      targetRotY = dir.current > 0 ? -Math.PI / 2 : Math.PI / 2;
     }
+
+    // Lerp to target
+    mesh.position.x = THREE.MathUtils.lerp(mesh.position.x, targetX, dt * 10);
+    mesh.position.z = THREE.MathUtils.lerp(mesh.position.z, targetZ, dt * 10);
+    currentRot.current = THREE.MathUtils.lerp(currentRot.current, targetRotY, dt * 10);
+    mesh.rotation.y = currentRot.current;
   });
 
   return (
-    <mesh ref={ref} castShadow>
+    <mesh ref={ref} castShadow userData={{ isCar: true }}>
       <boxGeometry args={[3.2, 1.4, 1.9]} />
       <meshStandardMaterial color={color} metalness={0.2} roughness={0.6} />
     </mesh>
@@ -344,36 +539,36 @@ function TrafficSignal({ x, z, phaseOffset }: TrafficSignalProps) {
   useFrame(({ clock }) => {
     const phase = Math.floor(((clock.getElapsedTime() + phaseOffset) / SIGNAL_CYCLE_SECONDS) % 3);
 
-    setEmissive(redRef.current, phase === 0 ? 1 : 0.15);
-    setEmissive(yellowRef.current, phase === 1 ? 1 : 0.15);
-    setEmissive(greenRef.current, phase === 2 ? 1 : 0.15);
+    setEmissive(redRef.current, phase === 0 ? 1.35 : 0.08);
+    setEmissive(yellowRef.current, phase === 1 ? 1.35 : 0.08);
+    setEmissive(greenRef.current, phase === 2 ? 1.35 : 0.08);
   });
 
   return (
-    <group position={[x + ROAD_W * 0.36, 0, z + ROAD_W * 0.36]}>
-      <mesh position={[0, 2.2, 0]} castShadow>
-        <cylinderGeometry args={[0.2, 0.2, 4.4, 12]} />
+    <group position={[x + ROAD_W * 0.34, 0, z + ROAD_W * 0.34]}>
+      <mesh position={[0, 2.4, 0]} castShadow>
+        <cylinderGeometry args={[0.3, 0.3, 4.8, 14]} />
         <meshStandardMaterial color="#3d3d3d" />
       </mesh>
 
-      <mesh position={[0, 4.4, 0]} castShadow>
-        <boxGeometry args={[1.1, 2.5, 0.9]} />
+      <mesh position={[0, 4.8, 0]} castShadow>
+        <boxGeometry args={[1.5, 3, 1.1]} />
         <meshStandardMaterial color="#111111" />
       </mesh>
 
-      <mesh ref={redRef} position={[0, 5.05, 0.48]}>
-        <sphereGeometry args={[0.22, 12, 12]} />
-        <meshStandardMaterial color="#ff2b2b" emissive="#ff2b2b" emissiveIntensity={0.15} />
+      <mesh ref={redRef} position={[0, 5.6, 0.6]}>
+        <sphereGeometry args={[0.32, 14, 14]} />
+        <meshStandardMaterial color="#ff2b2b" emissive="#ff2b2b" emissiveIntensity={0.12} />
       </mesh>
 
-      <mesh ref={yellowRef} position={[0, 4.4, 0.48]}>
-        <sphereGeometry args={[0.22, 12, 12]} />
-        <meshStandardMaterial color="#ffd166" emissive="#ffd166" emissiveIntensity={0.15} />
+      <mesh ref={yellowRef} position={[0, 4.8, 0.6]}>
+        <sphereGeometry args={[0.32, 14, 14]} />
+        <meshStandardMaterial color="#ffd166" emissive="#ffd166" emissiveIntensity={0.12} />
       </mesh>
 
-      <mesh ref={greenRef} position={[0, 3.75, 0.48]}>
-        <sphereGeometry args={[0.22, 12, 12]} />
-        <meshStandardMaterial color="#06d6a0" emissive="#06d6a0" emissiveIntensity={0.15} />
+      <mesh ref={greenRef} position={[0, 4, 0.6]}>
+        <sphereGeometry args={[0.32, 14, 14]} />
+        <meshStandardMaterial color="#06d6a0" emissive="#06d6a0" emissiveIntensity={0.12} />
       </mesh>
     </group>
   );
@@ -522,30 +717,13 @@ export default function App() {
     return map;
   }, []);
 
-  const signalIntersections = useMemo(() => {
-    const all: Array<{ x: number; z: number; score: number }> = [];
-    CENTERS.forEach((x, xi) => {
-      CENTERS.forEach((z, zi) => {
-        all.push({
-          x,
-          z,
-          score: hash01((xi + 1) * 17.7 + (zi + 1) * 23.1),
-        });
-      });
-    });
-
-    all.sort((a, b) => a.score - b.score);
-    const targetCount = Math.floor(all.length * SIGNAL_RATIO);
-
-    return all.slice(0, targetCount).map((item, i) => ({
-      x: item.x,
-      z: item.z,
-      phaseOffset: hash01((i + 1) * 4.4 + item.x * 0.07 + item.z * 0.11) * SIGNAL_CYCLE_SECONDS,
-    }));
-  }, []);
-
   return (
-    <Canvas style={{ width: "100vw", height: "100vh" }} camera={{ position: [280, 260, 280], fov: 45 }} shadows>
+    <Canvas
+      style={{ width: "100vw", height: "100vh" }}
+      camera={{ position: [280, 260, 280], fov: 45 }}
+      shadows
+      gl={{ antialias: true }}
+    >
       <color attach="background" args={["#87ceeb"]} />
 
       <ambientLight intensity={0.75} />
@@ -554,6 +732,7 @@ export default function App() {
       <OrbitControls
         target={[0, 0, 0]}
         enableDamping
+        dampingFactor={0.05}
         minDistance={60}
         maxDistance={700}
         maxPolarAngle={Math.PI / 2.05}
