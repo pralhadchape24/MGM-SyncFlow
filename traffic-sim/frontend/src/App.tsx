@@ -78,10 +78,108 @@ function App() {
     }
   };
 
+  const handleOrganDispatch = (result: any) => {
+    if (animationRef.current !== null) {
+      clearInterval(animationRef.current);
+      animationRef.current = null;
+    }
+
+    const logs: EventLog[] = [
+      {
+        id: `log-${Date.now()}-1`,
+        timestamp: new Date(),
+        event: "AMBULANCE_DISPATCHED",
+        message: `🚑 Organ dispatch: ${result.organType} to ${result.destinationHospital}`,
+        data: { trackingId: result.trackingId, urgency: result.urgencyLevel },
+      },
+      {
+        id: `log-${Date.now()}-2`,
+        timestamp: new Date(),
+        event: "HOSPITAL_ALERTED",
+        message: `🏥 Destination: ${result.destinationHospital}`,
+      },
+      {
+        id: `log-${Date.now()}-3`,
+        timestamp: new Date(),
+        event: "SIMULATION_END",
+        message: "✅ Organ delivery dispatched",
+      },
+    ];
+
+    setRoute(result.route || []);
+    setAllRoutes([]);
+    setViolations([]);
+    setLogs(logs);
+    setWaypoints(null);
+    setAmbulancePos((result.route && result.route[0]) || null);
+
+    // Ambulance animation along the route
+    if (result.route && result.route.length > 0) {
+      let i = 0;
+      animationRef.current = window.setInterval(() => {
+        setAmbulancePos(result.route[i]);
+        i++;
+        if (i >= result.route.length && animationRef.current !== null) {
+          clearInterval(animationRef.current);
+          animationRef.current = null;
+        }
+      }, 30);
+    }
+  };
+
+  const handlePatientDispatch = (result: any) => {
+    if (animationRef.current !== null) {
+      clearInterval(animationRef.current);
+      animationRef.current = null;
+    }
+
+    const logs: EventLog[] = [
+      {
+        id: `log-${Date.now()}-1`,
+        timestamp: new Date(),
+        event: "AMBULANCE_DISPATCHED",
+        message: `🚑 Patient dispatch: ${result.patientName} to ${result.destinationHospital}`,
+        data: { trackingId: result.trackingId, ambulanceId: result.ambulanceId },
+      },
+      {
+        id: `log-${Date.now()}-2`,
+        timestamp: new Date(),
+        event: "HOSPITAL_ALERTED",
+        message: `🏥 Destination: ${result.destinationHospital} | Dept: ${result.requiredDepartment}`,
+      },
+      {
+        id: `log-${Date.now()}-3`,
+        timestamp: new Date(),
+        event: "SIMULATION_END",
+        message: "✅ Patient transport dispatched",
+      },
+    ];
+
+    setRoute(result.route || []);
+    setAllRoutes([]);
+    setViolations([]);
+    setLogs(logs);
+    setWaypoints(null);
+    setAmbulancePos((result.route && result.route[0]) || null);
+
+    // Ambulance animation along the route
+    if (result.route && result.route.length > 0) {
+      let i = 0;
+      animationRef.current = window.setInterval(() => {
+        setAmbulancePos(result.route[i]);
+        i++;
+        if (i >= result.route.length && animationRef.current !== null) {
+          clearInterval(animationRef.current);
+          animationRef.current = null;
+        }
+      }, 30);
+    }
+  };
+
   return (
     <div className="app-shell">
       <section className="map-pane">
-        <ControlPanel onSimulate={simulate} loading={loading} />
+        <ControlPanel onSimulate={simulate} onOrganDispatch={handleOrganDispatch} onPatientDispatch={handlePatientDispatch} loading={loading} />
 
         <MapView
           hospitals={hospitals}

@@ -21,7 +21,11 @@ export async function fetchRoutes(
   const url = `${config.osrmUrl}/route/v1/driving/${start[1]},${start[0]};${end[1]},${end[0]}?overview=full&geometries=geojson&alternatives=true`;
 
   const res = await fetch(url);
-  const data = await res.json() as OSRMResponse;
+  const data = await res.json() as { routes: OSRMResponse["routes"] };
+
+  if (!data.routes || data.routes.length === 0) {
+    throw new Error(`OSRM returned no routes for ${start} -> ${end}`);
+  }
 
   return data.routes.map((r) => ({
     index: 0,

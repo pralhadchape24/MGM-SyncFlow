@@ -78,19 +78,24 @@ export async function runSimulation(
   // 3. Generate CCTV nodes
   const cctvs = generateCCTVNodes(best.path);
 
+  // Map only the CCTV nodes that exist (cctvs.length may be < best.path.length)
+  // source=cctvs[0], destination=cctvs[last], intermediates=cctvs[1..length-2]
   const waypoints: SimulationWaypoints | null =
-    best.path.length > 1 && cctvs.length > 1
+    best.path.length > 1 && cctvs.length >= 2
       ? {
           source: {
             index: 0,
             cctvId: cctvs[0].id,
             coordinates: best.path[0],
           },
-          intermediate: best.path.slice(1, -1).map((point, idx) => ({
-            index: idx + 1,
-            cctvId: cctvs[idx + 1].id,
-            coordinates: point,
-          })),
+          intermediate:
+            cctvs.length > 2
+              ? cctvs.slice(1, -1).map((cctv, idx) => ({
+                  index: idx + 1,
+                  cctvId: cctv.id,
+                  coordinates: best.path[idx + 1] ?? best.path[best.path.length - 1],
+                }))
+              : [],
           destination: {
             index: best.path.length - 1,
             cctvId: cctvs[cctvs.length - 1].id,
