@@ -697,6 +697,12 @@ def create_notification():
     return jsonify(serialize(db["notifications"].find_one({"_id": nid}))), 201
 
 
+# ── Health ───────────────────────────────────────────────────────────────────
+@app.route("/api/health")
+def health():
+    return jsonify({"status": "ok"}), 200
+
+
 # ── Serve HTML ────────────────────────────────────────────────────────────────
 @app.route("/")
 def serve_login():
